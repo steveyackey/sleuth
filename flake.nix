@@ -1,17 +1,13 @@
 {
   description = "sleuth: a fast, read-only disk-space detective for macOS and Linux";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # nixpkgs dropped x86_64-darwin after 26.05; Intel Macs build from the last branch that has it.
-    nixpkgs-intel-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs, nixpkgs-intel-darwin }:
+  outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      pkgsFor = system: (if system == "x86_64-darwin" then nixpkgs-intel-darwin else nixpkgs).legacyPackages.${system};
-      forAll = f: nixpkgs.lib.genAttrs systems (system: f (pkgsFor system));
+      # No x86_64-darwin: Nix and nixpkgs have dropped it. Intel Macs use cargo or the release binary.
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
+      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       manifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
     in
     {
