@@ -46,6 +46,10 @@ pub struct NixReport {
     pub min_free: Option<u64>,
     pub gc_job: Option<String>,
     pub determinate: bool,
+    /// Running NixOS: nix.conf is generated, so settings belong in configuration.nix.
+    pub nixos: bool,
+    /// Configuration suggestions (auto-optimise, automatic GC).
+    pub tips: Vec<Tip>,
     pub seconds: f64,
     pub notes: Vec<String>,
 }
@@ -80,6 +84,69 @@ fn generation(link: &Path) -> Option<(PathBuf, u64)> {
     let (prof, num) = stem.rsplit_once('-')?;
     let n = num.parse().ok()?;
     Some((link.with_file_name(prof), n))
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Tip {
+    pub id: &'static str,
+    pub problem: String,
+    /// First entry is the command to run now; the rest make it permanent.
+    pub fix: Vec<String>,
+}
+
+fn make_tips(auto_optimise: Option<bool>, gc_job: &Option<String>, min_free: Option<u64>, determinate: bool, nixos: bool) -> Vec<Tip> {
+    let conf = if determinate { "/etc/nix/nix.custom.conf" } else { "/etc/nix/nix.conf" };
+    let mut tips = Vec::new();
+    if auto_optimise == Some(false) {
+        tips.push(Tip {
+            id: "nix-auto-optimise",
+            problem: "auto-optimise-store is off. Identical files are stored once per path; optimise hard-links them (nothing is removed)".into(),
+            fix: vec![
+                "nix store optimise".into(),
+                if nixos {
+                    "then in configuration.nix: nix.settings.auto-optimise-store = true; (or nix.optimise.automatic = true;)".into()
+                } else {
+                    format!("then add auto-optimise-store = true to {conf}")
+                },
+            ],
+        });
+    }
+    if gc_job.is_none() && min_free.unwrap_or(0) == 0 {
+        tips.push(Tip {
+            id: "nix-auto-gc",
+            problem: "nothing collects garbage automatically (no GC job, min-free = 0)".into(),
+            fix: if nixos {
+                vec![
+                    "sudo nix-collect-garbage --delete-older-than 30d".into(),
+                    "then in configuration.nix: nix.gc = { automatic = true; dates = \"weekly\"; options = \"--delete-older-than 30d\"; };".into(),
+                    "and: nix.settings = { min-free = 5000000000; max-free = 20000000000; };  # GC when space is low".into(),
+                ]
+            } else {
+                vec![
+                    "nix-collect-garbage --delete-older-than 30d".into(),
+                    format!("then add min-free = 5000000000 and max-free = 20000000000 to {conf} (GC kicks in when space is low)"),
+                    "home-manager users: nix.gc.automatic = true; sets up a user timer".into(),
+                ]
+            },
+        });
+    }
+    tips
+}
+
+/// Where an automatic GC job would be installed on this platform.
+fn gc_job_dirs() -> Vec<PathBuf> {
+    let home = home().unwrap_or_default();
+    if cfg!(target_os = "macos") {
+        vec![PathBuf::from("/Library/LaunchDaemons"), home.join("Library/LaunchAgents")]
+    } else {
+        vec![
+            PathBuf::from("/etc/systemd/system"),
+            PathBuf::from("/etc/systemd/system/timers.target.wants"),
+            PathBuf::from("/run/systemd/system"),
+            home.join(".config/systemd/user"),
+            home.join(".config/systemd/user/timers.target.wants"),
+        ]
+    }
 }
 
 struct Group {
@@ -120,7 +187,9 @@ pub fn analyze() -> Option<NixReport> {
     };
     let auto_optimise = cfg("auto-optimise-store").map(|v| v == "true");
     let min_free = cfg("min-free").and_then(|v| v.parse().ok());
-    let gc_job = ["/Library/LaunchDaemons", &format!("{}/Library/LaunchAgents", home().unwrap_or_default().display())]
+    let nixos = Path::new("/etc/NIXOS").exists();
+    let determinate = version.contains("Determinate");
+    let gc_job = gc_job_dirs()
         .iter()
         .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -143,9 +212,10 @@ pub fn analyze() -> Option<NixReport> {
     let Some(roots_out) = roots_out else {
         notes.push("couldn't run nix-store --gc --print-roots; showing sizes only".into());
         let (bytes, _sizes, count) = store_scan.join().ok()??;
+        let tips = make_tips(auto_optimise, &gc_job, min_free, determinate, nixos);
         return Some(NixReport {
             store_bytes: bytes, store_paths: count, dead_bytes: 0, dead_paths: 0, pins: vec![],
-            shared_removable_bytes: 0, auto_optimise, min_free, gc_job, determinate: version.contains("Determinate"),
+            shared_removable_bytes: 0, auto_optimise, min_free, gc_job, determinate, nixos, tips,
             seconds: t.elapsed().as_secs_f64(), notes,
         });
     };
@@ -172,10 +242,14 @@ pub fn analyze() -> Option<NixReport> {
             } else {
                 let root_owned = profile.starts_with("/nix/var/nix/profiles") && !profile.starts_with(format!("/nix/var/nix/profiles/per-user/{me}"));
                 let sudo = if root_owned { "sudo " } else { "" };
-                let cmd = format!(
+                let mut cmd = format!(
                     "{sudo}nix-env --profile {} --delete-generations old && {sudo}nix-store --gc",
                     shq(&profile)
                 );
+                // NixOS keeps a boot menu entry per system generation; refresh it so /boot shrinks too.
+                if nixos && profile == Path::new("/nix/var/nix/profiles/system") {
+                    cmd.push_str(" && sudo /run/current-system/bin/switch-to-configuration boot");
+                }
                 add(PinKind::OldGenerations, format!("gens:{}", profile.display()), format!("{pname}: old generations"), link_p, root, cmd);
             }
             continue;
@@ -295,8 +369,10 @@ pub fn analyze() -> Option<NixReport> {
         shared_removable_bytes: shared_removable,
         auto_optimise,
         min_free,
+        tips: make_tips(auto_optimise, &gc_job, min_free, determinate, nixos),
         gc_job,
-        determinate: version.contains("Determinate"),
+        determinate,
+        nixos,
         seconds: t.elapsed().as_secs_f64(),
         notes,
     })

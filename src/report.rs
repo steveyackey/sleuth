@@ -1,4 +1,4 @@
-use crate::rules::{file_hint, ArtifactKind, Safety, RULES, SYSTEM_RULES};
+use crate::rules::{file_hint, home_rules, ArtifactKind, Safety, APP_DATA_DIRS, OPEN, SYSTEM_RULES, UNREADABLE_HINT, USERS_DIR};
 use crate::nix::{NixReport, PinKind};
 use crate::scan::{Node, ScanResult};
 use crate::sys::{SystemFacts, Volume};
@@ -8,8 +8,19 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+/// Bumped whenever a field is renamed or removed (adding fields doesn't bump it).
+pub const SCHEMA_VERSION: u32 = 1;
+
 #[derive(Serialize)]
 pub struct Report {
+    pub schema_version: u32,
+    /// "macos" or "linux".
+    pub platform: &'static str,
+    /// ID from /etc/os-release on Linux ("fedora", "nixos", …); "macos" on a Mac.
+    pub distro: String,
+    pub is_root: bool,
+    /// Every suggestion in one flat list, safest and biggest first. The easiest thing to act on.
+    pub actions: Vec<Action>,
     pub root: PathBuf,
     pub stale_days: u64,
     pub scanned_bytes: u64,
@@ -32,9 +43,33 @@ pub struct Report {
     pub reclaimable_review: u64,
 }
 
+/// One thing that could be done, with the command to do it. sleuth never runs these.
+#[derive(Serialize)]
+pub struct Action {
+    /// Stable across runs for the same thing: "<kind>:<path or name>".
+    pub id: String,
+    /// "suspect" | "artifact" | "nix-garbage" | "nix-pin" | "nix-tip" | "large-file"
+    pub kind: &'static str,
+    pub label: String,
+    pub path: Option<PathBuf>,
+    /// Estimated bytes freed by running the command (not counting anything listed separately).
+    pub bytes: u64,
+    pub safety: Safety,
+    pub command: String,
+    /// The command needs root (it contains sudo, or touches root-owned paths).
+    pub needs_sudo: bool,
+    /// For artifacts: the owning project hasn't been touched for stale_days.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 #[derive(Serialize)]
 pub struct TreeNode {
     pub name: String,
+    /// Absolute path; pass it back to sleuth to drill in.
+    pub path: PathBuf,
     pub size: u64,
     pub files: u64,
     pub newest: i64,
@@ -93,16 +128,17 @@ pub struct Opts {
     pub min_suspect: u64,
 }
 
-fn tree(n: &Node, depth: usize, min: u64) -> TreeNode {
+fn tree(n: &Node, path: &Path, depth: usize, min: u64) -> TreeNode {
     TreeNode {
         name: n.name.to_string_lossy().into_owned(),
+        path: pretty(path),
         size: n.size,
         files: n.files,
         newest: n.newest,
         children: if depth == 0 {
             vec![]
         } else {
-            n.children.iter().filter(|c| c.size >= min).map(|c| tree(c, depth - 1, min)).collect()
+            n.children.iter().filter(|c| c.size >= min).map(|c| tree(c, &path.join(&c.name), depth - 1, min)).collect()
         },
     }
 }
@@ -144,7 +180,7 @@ pub fn build(
 
     // --- known locations
     let mut suspects: Vec<Suspect> = Vec::new();
-    let home_rules = RULES.iter().map(|r| (home.join(r.rel), r));
+    let home_rules = home_rules().map(|r| (home.join(r.rel), r));
     let sys_rules = SYSTEM_RULES.iter().map(|r| (PathBuf::from(r.rel), r));
     for (p, r) in home_rules.chain(sys_rules) {
         let p = in_scan_ns(root, &p);
@@ -167,11 +203,7 @@ pub fn build(
         });
     }
     // --- big app data folders with no specific rule
-    for (rel, what) in [
-        ("Library/Application Support", "App data"),
-        ("Library/Containers", "Sandboxed app data"),
-        ("Library/Group Containers", "Shared app data"),
-    ] {
+    for &(rel, what) in APP_DATA_DIRS {
         let base = in_scan_ns(root, &home.join(rel));
         let Some(n) = res.root.find(root, &base) else { continue };
         for c in n.children.iter().filter(|c| c.size >= 2_000_000_000) {
@@ -181,7 +213,7 @@ pub fn build(
             }
             suspects.push(Suspect {
                 label: format!("{what}: {}", c.name.to_string_lossy()),
-                command: format!("open {}", shq(&p)),
+                command: format!("{} {}", OPEN, shq(&p)),
                 path: p,
                 size: c.size,
                 safety: Safety::Review,
@@ -192,10 +224,10 @@ pub fn build(
         }
     }
     // other people's home folders
-    if let Some(users) = res.root.find(root, &in_scan_ns(root, Path::new("/Users"))) {
+    if let Some(users) = res.root.find(root, &in_scan_ns(root, Path::new(USERS_DIR))) {
         for c in users.children.iter().filter(|c| c.size >= 1_000_000_000) {
-            let p = in_scan_ns(root, &Path::new("/Users").join(&c.name));
-            if pretty(&p) == home || c.name == "Shared" {
+            let p = in_scan_ns(root, &Path::new(USERS_DIR).join(&c.name));
+            if pretty(&p) == home || ["Shared", "linuxbrew", "lost+found"].iter().any(|n| c.name == *n) {
                 continue;
             }
             suspects.push(Suspect {
@@ -277,7 +309,7 @@ pub fn build(
         reclaimable_review += n.pins.iter().filter(|p| removable(p.kind)).map(|p| p.unique_bytes).sum::<u64>();
     }
 
-    let largest_files = res
+    let largest_files: Vec<FileOut> = res
         .largest_files
         .iter()
         .take(o.top)
@@ -291,9 +323,15 @@ pub fn build(
 
     let outside_scan = volume.as_ref().map(|v| v.used.saturating_sub(total));
 
-    let mut t = tree(&res.root, o.depth, min_tree);
+    let mut t = tree(&res.root, root, o.depth, min_tree);
     t.name = root.display().to_string();
+    let actions = actions(&suspects, &artifacts, nix.as_ref(), &largest_files, o.min_suspect);
     Report {
+        schema_version: SCHEMA_VERSION,
+        platform: std::env::consts::OS,
+        distro: distro(),
+        is_root: unsafe { libc::geteuid() } == 0,
+        actions,
         root: root.to_owned(),
         stale_days: o.stale_days,
         scanned_bytes: total,
@@ -314,6 +352,115 @@ pub fn build(
         reclaimable_safe,
         reclaimable_review,
     }
+}
+
+fn distro() -> String {
+    if cfg!(target_os = "macos") {
+        return "macos".into();
+    }
+    std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("ID=").map(|v| v.trim_matches('"').to_string())))
+        .unwrap_or_else(|| "linux".into())
+}
+
+fn needs_sudo(cmd: &str) -> bool {
+    cmd.split(|c: char| c.is_whitespace() || c == '&' || c == ';' || c == '|').any(|w| w == "sudo")
+}
+
+fn actions(suspects: &[Suspect], artifacts: &[ArtifactGroup], nix: Option<&NixReport>, files: &[FileOut], min: u64) -> Vec<Action> {
+    let mut v = Vec::new();
+    // Personal data never becomes an action, even with a command (those just open a folder).
+    for s in suspects.iter().filter(|s| !s.command.is_empty() && s.safety != Safety::Personal) {
+        v.push(Action {
+            id: format!("suspect:{}", pretty(&s.path).display()),
+            kind: "suspect",
+            label: s.label.clone(),
+            path: Some(pretty(&s.path)),
+            bytes: s.size - s.nested_reported,
+            safety: s.safety,
+            needs_sudo: needs_sudo(&s.command),
+            command: s.command.clone(),
+            stale: false,
+            note: s.note.clone(),
+        });
+    }
+    for g in artifacts {
+        for i in &g.items {
+            v.push(Action {
+                id: format!("artifact:{}", pretty(&i.path).display()),
+                kind: "artifact",
+                label: g.label.clone(),
+                path: Some(pretty(&i.path)),
+                bytes: i.size,
+                safety: g.safety,
+                needs_sudo: false,
+                command: i.command.clone(),
+                stale: i.stale,
+                note: format!("project touched {}", age(i.project_newest)),
+            });
+        }
+    }
+    if let Some(n) = nix {
+        if n.dead_bytes > 0 {
+            v.push(Action {
+                id: "nix-garbage".into(),
+                kind: "nix-garbage",
+                label: format!("Nix garbage ({} paths nothing references)", n.dead_paths),
+                path: Some("/nix/store".into()),
+                bytes: n.dead_bytes,
+                safety: Safety::Safe,
+                command: "nix-store --gc".into(),
+                needs_sudo: false,
+                stale: false,
+                note: String::new(),
+            });
+        }
+        for p in n.pins.iter().filter(|p| removable(p.kind) && !p.command.is_empty()) {
+            v.push(Action {
+                id: format!("nix-pin:{}", p.links.first().map(|l| l.display().to_string()).unwrap_or_default()),
+                kind: "nix-pin",
+                label: p.label.clone(),
+                path: p.links.first().cloned(),
+                bytes: p.unique_bytes,
+                safety: Safety::Review,
+                needs_sudo: needs_sudo(&p.command),
+                command: p.command.clone(),
+                stale: false,
+                note: format!("{} GC root(s); bytes are what this frees on its own", p.links.len()),
+            });
+        }
+        for t in &n.tips {
+            v.push(Action {
+                id: format!("nix-tip:{}", t.id),
+                kind: "nix-tip",
+                label: t.problem.clone(),
+                path: None,
+                bytes: 0,
+                safety: Safety::Safe,
+                needs_sudo: needs_sudo(&t.fix[0]),
+                command: t.fix[0].clone(),
+                stale: false,
+                note: t.fix[1..].join("\n"),
+            });
+        }
+    }
+    for f in files.iter().filter(|f| f.size >= min) {
+        v.push(Action {
+            id: format!("large-file:{}", pretty(&f.path).display()),
+            kind: "large-file",
+            label: f.hint.clone().unwrap_or_else(|| "large file".into()),
+            path: Some(pretty(&f.path)),
+            bytes: f.size,
+            safety: Safety::Review,
+            command: format!("rm {}", shq(&f.path)),
+            needs_sudo: false,
+            stale: false,
+            note: format!("modified {}", age(f.mtime)),
+        });
+    }
+    v.sort_by(|a, b| (a.safety, std::cmp::Reverse(a.bytes)).cmp(&(b.safety, std::cmp::Reverse(b.bytes))));
+    v
 }
 
 fn removable(k: PinKind) -> bool {
@@ -352,16 +499,11 @@ fn nix_section(o: &mut String, n: &NixReport) {
     if let Some(p) = n.pins.iter().find(|p| p.kind == PinKind::InUse) {
         let _ = writeln!(o, "  {:6} {:>8}  {}", dim("IN USE"), dim(&human(p.closure_bytes)), dim("current system + home generations (not reclaimable)"));
     }
-    let conf = if n.determinate { "/etc/nix/nix.custom.conf" } else { "/etc/nix/nix.conf" };
-    if n.auto_optimise == Some(false) {
-        let _ = writeln!(o, "  {} {:>8}  auto-optimise-store is off. Identical files are stored once per path", yellow("TIP   "), "");
-        let _ = writeln!(o, "{pad}{}", dim("optimise hard-links duplicates across the store; nothing is removed"));
-        let _ = writeln!(o, "{pad}{} nix store optimise   {}", cyan("→"), dim(&format!("# then add auto-optimise-store = true to {conf}")));
-    }
-    if n.gc_job.is_none() && n.min_free.unwrap_or(0) == 0 {
-        let _ = writeln!(o, "  {} {:>8}  nothing collects garbage automatically (no GC job, min-free = 0)", yellow("TIP   "), "");
-        let _ = writeln!(o, "{pad}{} {}", cyan("→"), dim(&format!("add min-free = 5000000000 and max-free = 20000000000 to {conf} (GC kicks in when space is low)")));
-        let _ = writeln!(o, "{pad}{} {}", cyan("→"), dim("old generations are GC roots, so also prune them now and then: nix-collect-garbage --delete-older-than 30d"));
+    for t in &n.tips {
+        let _ = writeln!(o, "  {} {:>8}  {}", yellow("TIP   "), "", t.problem);
+        for (i, f) in t.fix.iter().enumerate() {
+            let _ = writeln!(o, "{pad}{} {}", cyan("→"), if i == 0 { f.clone() } else { dim(f) });
+        }
     }
     for note in &n.notes {
         let _ = writeln!(o, "  {}", dim(note));
@@ -498,6 +640,19 @@ pub fn text(r: &Report, top: usize) -> String {
                 cyan("→")
             ));
         }
+        let held: u64 = s.deleted_open.iter().map(|d| d.bytes).sum();
+        if held >= 100_000_000 {
+            let who: Vec<String> = s.deleted_open.iter().take(3).map(|d| format!("{} (pid {}) {}", d.process, d.pid, human(d.bytes))).collect();
+            sys_lines.push(format!(
+                "{} in deleted files still held open by running processes; freed when they close them or restart. {} {}",
+                bold(&human(held)),
+                dim(&who.join(" · ")),
+                cyan("→ sudo lsof +L1"),
+            ));
+        }
+        if !s.saw_all_processes && held < 100_000_000 && unsafe { libc::geteuid() } != 0 {
+            sys_lines.push(dim("couldn't check other users' processes for deleted-but-open files (run with sudo)"));
+        }
         for v in &s.sibling_volumes {
             let hint = match if v.mount.is_empty() { v.name.as_str() } else { v.mount.as_str() } {
                 "/nix" if r.nix.is_some() => "see NIX STORE below".to_string(),
@@ -513,8 +668,9 @@ pub fn text(r: &Report, top: usize) -> String {
     }
     if r.unreadable_dirs > 0 {
         sys_lines.push(format!(
-            "{} folders were unreadable, so totals are low. Give your terminal Full Disk Access: System Settings › Privacy & Security › Full Disk Access{}",
+            "{} folders were unreadable, so totals are low. {}{}",
             yellow(&group(r.unreadable_dirs)),
+            UNREADABLE_HINT,
             r.unreadable_examples.first().map(|p| dim(&format!(" (e.g. {})", tilde(p)))).unwrap_or_default()
         ));
     }
@@ -591,9 +747,11 @@ pub fn script(r: &Report) -> String {
             let _ = writeln!(o, "\n# [REVIEW] {} freed on its own · {}", human(p.unique_bytes), p.label);
             let _ = writeln!(o, "# {}", p.command);
         }
-        if n.auto_optimise == Some(false) {
-            let _ = writeln!(o, "\n# [SAFE] dedupe identical files in the store (hard links)");
-            let _ = writeln!(o, "# nix store optimise");
+        for t in &n.tips {
+            let _ = writeln!(o, "\n# [TIP] {}", t.problem);
+            for f in &t.fix {
+                let _ = writeln!(o, "# {f}");
+            }
         }
     }
     let _ = writeln!(o, "\n# ===== Largest files =====");

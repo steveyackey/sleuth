@@ -2,7 +2,9 @@
 name = "sleuth"
 version = "0.1.0"
 edition = "2021"
-description = "Read-only disk-space detective for macOS"
+description = "Read-only disk-space detective for macOS and Linux"
+repository = "https://github.com/steveyackey/sleuth"
+publish = false
 
 [[bin]]
 name = "sleuth"
