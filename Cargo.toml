@@ -1,0 +1,22 @@
+[package]
+name = "sleuth"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only disk-space detective for macOS"
+
+[[bin]]
+name = "sleuth"
+path = "src/main.rs"
+
+[dependencies]
+rayon = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
