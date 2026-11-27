@@ -1,0 +1,9 @@
+# https://release-plz.dev/docs/config
+[workspace]
+# Not on crates.io: the last released version comes from git tags (v0.1.0, …).
+git_only = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+changelog_update = true
+# A binary crate has no public API to semver-check.
+semver_check = false

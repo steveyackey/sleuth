@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Rejects commit messages that aren't Conventional Commits: type(scope)!: subject
+# Enable once per clone: git config core.hooksPath .githooks  (nix develop does it for you)
+subject=$(sed -n '/^[^#]/{p;q;}' "$1")
+case "$subject" in
+  Merge\ *|Revert\ *|fixup!\ *|squash!\ *|amend!\ *) exit 0 ;;
+esac
+types='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+if ! printf '%s\n' "$subject" | grep -Eq "^($types)(\([a-z0-9._/-]+\))?!?: [^ ].*"; then
+  echo "commit-msg: not a Conventional Commit: $subject" >&2
+  echo "  use <type>(<optional scope>): <subject>, e.g. 'feat(scan): walk btrfs subvolumes'" >&2
+  echo "  types: $types   breaking: add ! before the colon" >&2
+  exit 1
+fi

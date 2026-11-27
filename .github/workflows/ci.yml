@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Every commit in a PR must be a Conventional Commit; release-plz builds the changelog
+  # and picks the next version from them.
+  commits:
+    name: Conventional commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: commitlint.config.mjs
+
+  # The PR title becomes the commit message on squash merges, so it must conform too.
+  pr-title:
+    name: Conventional PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo:
+    name: cargo (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, system: x86_64-linux }
+          - { os: ubuntu-24.04-arm, system: aarch64-linux }
+          - { os: macos-15-intel, system: x86_64-darwin }
+          - { os: macos-latest, system: aarch64-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=./target/release/sleuth
+          $bin --help > /dev/null
+          $bin . --no-color > /dev/null
+          $bin "$HOME" --actions --no-nix > actions.ndjson
+          jq -e -s 'all(.[]; has("id") and has("command") and has("safety"))' actions.ndjson
+          $bin . --json | jq -e '.schema_version == 1 and (.actions | type == "array") and .tree.path != null'
+          set +e; $bin /nonexistent --json 2> err.json; code=$?; set -e
+          test "$code" -eq 2
+          jq -e '.exit_code == 2 and (.error | length > 0)' err.json
+
+  nix:
+    name: nix (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, system: x86_64-linux }
+          - { os: ubuntu-24.04-arm, system: aarch64-linux }
+          - { os: macos-15-intel, system: x86_64-darwin }
+          - { os: macos-latest, system: aarch64-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v32
+      - run: nix build -L .#sleuth
+      - run: ./result/bin/sleuth . --no-color --no-nix > /dev/null
+      - run: nix flake check -L
+      - name: Evaluate every system
+        if: matrix.system == 'x86_64-linux'
+        run: nix flake check --all-systems --no-build

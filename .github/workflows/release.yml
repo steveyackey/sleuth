@@ -1,0 +1,109 @@
+name: Release
+
+# On every push to main, release-plz:
+#  - keeps a "chore: release vX.Y.Z" PR open with the version bump and CHANGELOG, from
+#    the Conventional Commits since the last tag;
+#  - when that PR is merged (the version in Cargo.toml has no tag yet), tags vX.Y.Z and
+#    creates the GitHub release. The binaries job then builds and attaches binaries.
+# Binaries are built here rather than in a separate on-release workflow because events
+# created with GITHUB_TOKEN don't trigger other workflows.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    name: Release-plz release
+    if: github.repository_owner == 'steveyackey'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      created: ${{ steps.release.outputs.releases_created }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - id: release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        if: steps.release.outputs.releases_created == 'true'
+        shell: bash
+        env:
+          RELEASES: ${{ steps.release.outputs.releases }}
+        run: echo "tag=$(jq -r '.[0].tag' <<< "$RELEASES")" >> "$GITHUB_OUTPUT"
+
+  release-pr:
+    name: Release-plz PR
+    if: github.repository_owner == 'steveyackey'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  binaries:
+    name: Binary (${{ matrix.target }})
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux binaries are static (musl): they run on any distro, NixOS included.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target "$TARGET"
+      - name: Smoke test
+        run: '"./target/$TARGET/release/sleuth" . --no-color > /dev/null'
+      - name: Package and upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          name="sleuth-$TAG-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/sleuth" README.md AGENTS.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          gh release upload "$TAG" "$name.tar.gz" "$name.tar.gz.sha256" --clobber
