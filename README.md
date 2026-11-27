@@ -8,14 +8,14 @@ and gives you the exact command. You decide what to run.
 ## Install
 
 ```sh
-nix run github:steveyackey/sleuth            # try it (any of the 4 platforms)
+nix run github:steveyackey/sleuth            # try it (Linux x86_64/arm64, Apple silicon)
 nix profile install github:steveyackey/sleuth
 cargo install --git https://github.com/steveyackey/sleuth
 ```
 
 Prebuilt binaries for `x86_64`/`aarch64` Linux and macOS are attached to every
 [GitHub release](https://github.com/steveyackey/sleuth/releases). The Linux ones are static (musl), so they run on any
-distro, NixOS included.
+distro, NixOS included. Intel Macs: use the release binary or `cargo install` (Nix has dropped x86_64-darwin).
 
 On NixOS or with nix-darwin/home-manager, add the flake as an input and use `inputs.sleuth.packages.${system}.default`
 (or `overlays.default`, which adds `pkgs.sleuth`).

@@ -75,21 +75,18 @@ jobs:
 
   nix:
     name: nix (${{ matrix.system }})
+    # No Intel macOS: Nix and nixpkgs have dropped x86_64-darwin. Intel Macs use cargo or the release binary.
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, system: x86_64-linux }
           - { os: ubuntu-24.04-arm, system: aarch64-linux }
-          - { os: macos-15-intel, system: x86_64-darwin }
           - { os: macos-latest, system: aarch64-darwin }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v32
-        with:
-          # Nix 2.36 dropped the x86_64-darwin installer; 2.35.0 is the last one with it.
-          install_url: ${{ matrix.system == 'x86_64-darwin' && 'https://releases.nixos.org/nix/nix-2.35.0/install' || '' }}
       - run: nix build -L .#sleuth
       - run: ./result/bin/sleuth . --no-color --no-nix > /dev/null
       - run: nix flake check -L
