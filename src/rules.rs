@@ -1,4 +1,4 @@
-//! The detective's casebook: known space hogs on macOS and how to deal with them.
+//! The detective's casebook: known space hogs on macOS and Linux and how to deal with them.
 //! Nothing here deletes anything — commands are suggestions for the human.
 
 use serde::Serialize;
@@ -40,8 +40,49 @@ macro_rules! r {
     };
 }
 
-pub const RULES: &[Rule] = &[
-    // --- macOS / apps
+/// Rules for paths relative to $HOME on this platform.
+pub fn home_rules() -> impl Iterator<Item = &'static Rule> {
+    COMMON_RULES.iter().chain(HOME_RULES.iter())
+}
+
+/// Cross-platform toolchains and caches, relative to $HOME.
+const COMMON_RULES: &[Rule] = &[
+    r!(".colima", "Colima VMs", Review, "colima list && colima delete <profile>", ""),
+    r!(".local/share/containers", "Podman storage", Review, "podman system prune -a", ""),
+    r!(".vagrant.d/boxes", "Vagrant boxes", Review, "vagrant box prune", ""),
+    r!(".minikube", "minikube", Review, "minikube delete --all", ""),
+    r!(".android/avd", "Android emulators", Review, "emulator -list-avds", "Delete from Android Studio › Device Manager"),
+    r!(".npm/_cacache", "npm cache", Safe, "npm cache clean --force", ""),
+    r!(".yarn/berry/cache", "Yarn Berry cache", Safe, "yarn cache clean --all", ""),
+    r!(".bun/install/cache", "Bun cache", Safe, "bun pm cache rm", ""),
+    r!(".cache/puppeteer", "Puppeteer browsers", Safe, "rm -rf {p}", ""),
+    r!(".nvm/versions/node", "nvm Node versions", Review, "nvm ls  # then: nvm uninstall <version>", ""),
+    r!(".volta/tools/image", "Volta toolchains", Review, "volta list all", ""),
+    r!(".cargo/registry", "Cargo registry", Safe, "cargo install cargo-cache && cargo cache --autoclean", "Crates re-download on demand"),
+    r!(".rustup/toolchains", "Rust toolchains", Review, "rustup toolchain list  # then: rustup toolchain uninstall <name>", ""),
+    r!("go/pkg/mod", "Go module cache", Safe, "go clean -modcache", ""),
+    r!(".gradle/caches", "Gradle caches", Safe, "rm -rf {p}", ""),
+    r!(".gradle/wrapper/dists", "Gradle distributions", Safe, "rm -rf {p}", ""),
+    r!(".m2/repository", "Maven repository", Safe, "rm -rf {p}", "Re-downloads on next build"),
+    r!(".nuget/packages", "NuGet packages", Safe, "dotnet nuget locals all --clear", ""),
+    r!(".cache/pip", "pip cache", Safe, "pip cache purge", ""),
+    r!(".cache/uv", "uv cache", Safe, "uv cache clean", ""),
+    r!(".pyenv/versions", "pyenv Pythons", Review, "pyenv versions  # then: pyenv uninstall <version>", ""),
+    r!("miniconda3/pkgs", "Conda package cache", Safe, "conda clean --all", ""),
+    r!("anaconda3/pkgs", "Conda package cache", Safe, "conda clean --all", ""),
+    r!(".conda/pkgs", "Conda package cache", Safe, "conda clean --all", ""),
+    r!(".terraform.d/plugin-cache", "Terraform plugin cache", Safe, "rm -rf {p}/*", ""),
+    r!(".cache/pre-commit", "pre-commit envs", Safe, "pre-commit clean", ""),
+    r!(".cache/huggingface", "Hugging Face models", Review, "hf cache scan  # then: hf cache delete", ""),
+    r!(".ollama/models", "Ollama models", Review, "ollama list  # then: ollama rm <model>", ""),
+    r!(".lmstudio/models", "LM Studio models", Review, "", "Delete models in LM Studio › My Models"),
+    r!(".cache/lm-studio", "LM Studio models", Review, "", "Delete models in LM Studio › My Models"),
+    r!(".cache/torch", "PyTorch hub cache", Safe, "rm -rf {p}", ""),
+    r!(".cache/nix", "Nix fetcher & eval cache", Safe, "rm -rf {p}", "Tarballs and flake inputs; re-fetched on demand"),
+];
+
+#[cfg(target_os = "macos")]
+const HOME_RULES: &[Rule] = &[
     r!(".Trash", "Trash", Safe, "osascript -e 'tell app \"Finder\" to empty trash'", "Already thrown away, just not emptied"),
     r!("Library/Caches", "App caches", Safe, "rm -rf {p}/*", "Apps rebuild these. Quit big apps first; the largest are listed below"),
     r!("Library/Logs", "Logs", Safe, "rm -rf {p}/*", "Diagnostic logs"),
@@ -59,70 +100,103 @@ pub const RULES: &[Rule] = &[
     r!("Pictures/Photos Library.photoslibrary", "Photos library", Personal, "", "Photos › Settings › iCloud › Optimize Mac Storage"),
     r!("Music", "Music", Personal, "", ""),
     r!("Library/Containers/com.apple.Safari/Data/Library/Caches", "Safari cache", Safe, "rm -rf {p}/*", ""),
-    // --- Xcode / Apple dev
     r!("Library/Developer/Xcode/DerivedData", "Xcode DerivedData", Safe, "rm -rf {p}/*", "Build intermediates; Xcode regenerates"),
     r!("Library/Developer/Xcode/iOS DeviceSupport", "Xcode iOS DeviceSupport", Safe, "rm -rf {p}/*", "Debug symbols, re-copied when a device connects"),
     r!("Library/Developer/Xcode/watchOS DeviceSupport", "Xcode watchOS DeviceSupport", Safe, "rm -rf {p}/*", ""),
     r!("Library/Developer/Xcode/Archives", "Xcode Archives", Review, "open {p}", "Holds dSYMs for shipped builds. Keep the ones you might need to symbolicate"),
     r!("Library/Developer/CoreSimulator/Devices", "iOS Simulator devices", Review, "xcrun simctl delete unavailable", "Removes sims for runtimes you no longer have"),
     r!("Library/Developer/CoreSimulator/Caches", "iOS Simulator caches", Safe, "rm -rf {p}/*", ""),
-    // --- containers / VMs
     r!("Library/Containers/com.docker.docker", "Docker Desktop disk", Review, "docker system df && docker system prune -a --volumes", "The VM disk file only shrinks after pruning (and sometimes needs Docker › Settings › Resources to reclaim)"),
     r!(".orbstack", "OrbStack data", Review, "orb prune  # or: docker system prune -a", ""),
-    r!(".colima", "Colima VMs", Review, "colima list && colima delete <profile>", ""),
-    r!(".local/share/containers", "Podman storage", Review, "podman system prune -a", ""),
-    r!(".vagrant.d/boxes", "Vagrant boxes", Review, "vagrant box prune", ""),
-    r!(".minikube", "minikube", Review, "minikube delete --all", ""),
     r!("Library/Containers/com.utmapp.UTM", "UTM virtual machines", Review, "", "Delete VMs you don't use from UTM"),
     r!("Parallels", "Parallels VMs", Review, "", "Delete or compact VMs from Parallels Control Center"),
-    r!(".android/avd", "Android emulators", Review, "emulator -list-avds", "Delete from Android Studio › Device Manager"),
     r!("Library/Android/sdk", "Android SDK", Review, "", "Uninstall old platforms and system images in SDK Manager"),
-    // --- package managers & toolchains
     r!("Library/Caches/Homebrew", "Homebrew downloads", Safe, "brew cleanup --prune=all", ""),
-    r!(".npm/_cacache", "npm cache", Safe, "npm cache clean --force", ""),
     r!("Library/Caches/Yarn", "Yarn cache", Safe, "yarn cache clean", ""),
-    r!(".yarn/berry/cache", "Yarn Berry cache", Safe, "yarn cache clean --all", ""),
     r!("Library/pnpm/store", "pnpm store", Safe, "pnpm store prune", ""),
-    r!(".bun/install/cache", "Bun cache", Safe, "bun pm cache rm", ""),
     r!("Library/Caches/ms-playwright", "Playwright browsers", Safe, "npx playwright uninstall --all", "Re-installed by npx playwright install"),
     r!("Library/Caches/Cypress", "Cypress binaries", Safe, "npx cypress cache prune", ""),
-    r!(".cache/puppeteer", "Puppeteer browsers", Safe, "rm -rf {p}", ""),
-    r!(".nvm/versions/node", "nvm Node versions", Review, "nvm ls  # then: nvm uninstall <version>", ""),
     r!("Library/Application Support/fnm/node-versions", "fnm Node versions", Review, "fnm list  # then: fnm uninstall <version>", ""),
-    r!(".volta/tools/image", "Volta toolchains", Review, "volta list all", ""),
-    r!(".cargo/registry", "Cargo registry", Safe, "cargo install cargo-cache && cargo cache --autoclean", "Crates re-download on demand"),
-    r!(".rustup/toolchains", "Rust toolchains", Review, "rustup toolchain list  # then: rustup toolchain uninstall <name>", ""),
-    r!("go/pkg/mod", "Go module cache", Safe, "go clean -modcache", ""),
     r!("Library/Caches/go-build", "Go build cache", Safe, "go clean -cache", ""),
-    r!(".gradle/caches", "Gradle caches", Safe, "rm -rf {p}", ""),
-    r!(".gradle/wrapper/dists", "Gradle distributions", Safe, "rm -rf {p}", ""),
-    r!(".m2/repository", "Maven repository", Safe, "rm -rf {p}", "Re-downloads on next build"),
-    r!(".nuget/packages", "NuGet packages", Safe, "dotnet nuget locals all --clear", ""),
     r!("Library/Caches/pip", "pip cache", Safe, "pip cache purge", ""),
-    r!(".cache/pip", "pip cache", Safe, "pip cache purge", ""),
-    r!(".cache/uv", "uv cache", Safe, "uv cache clean", ""),
     r!("Library/Caches/pypoetry", "Poetry cache", Safe, "poetry cache clear --all .", ""),
-    r!(".pyenv/versions", "pyenv Pythons", Review, "pyenv versions  # then: pyenv uninstall <version>", ""),
-    r!("miniconda3/pkgs", "Conda package cache", Safe, "conda clean --all", ""),
-    r!("anaconda3/pkgs", "Conda package cache", Safe, "conda clean --all", ""),
-    r!(".conda/pkgs", "Conda package cache", Safe, "conda clean --all", ""),
     r!(".cocoapods/repos", "CocoaPods specs", Safe, "pod repo remove trunk", ""),
     r!("Library/Caches/CocoaPods", "CocoaPods cache", Safe, "pod cache clean --all", ""),
-    r!(".terraform.d/plugin-cache", "Terraform plugin cache", Safe, "rm -rf {p}/*", ""),
-    r!(".cache/pre-commit", "pre-commit envs", Safe, "pre-commit clean", ""),
     r!("Library/Caches/JetBrains", "JetBrains caches", Safe, "rm -rf {p}/*", "Old IDE version caches pile up"),
     r!("Library/Application Support/JetBrains", "JetBrains IDE data", Review, "open {p}", "Folders for old IDE versions are safe to remove"),
-    // --- AI / ML
-    r!(".cache/huggingface", "Hugging Face models", Review, "hf cache scan  # then: hf cache delete", ""),
-    r!(".ollama/models", "Ollama models", Review, "ollama list  # then: ollama rm <model>", ""),
-    r!(".lmstudio/models", "LM Studio models", Review, "", "Delete models in LM Studio › My Models"),
-    r!(".cache/lm-studio", "LM Studio models", Review, "", "Delete models in LM Studio › My Models"),
-    r!(".cache/torch", "PyTorch hub cache", Safe, "rm -rf {p}", ""),
-    // --- games
     r!("Library/Application Support/Steam/steamapps", "Steam games", Personal, "", "Uninstall games from Steam"),
 ];
 
+#[cfg(target_os = "linux")]
+const HOME_RULES: &[Rule] = &[
+    // --- desktop / apps
+    r!(".local/share/Trash", "Trash", Safe, "gio trash --empty", "Already thrown away, just not emptied"),
+    r!(".cache", "App caches (~/.cache)", Safe, "rm -rf {p}/*", "Apps rebuild these. Quit big apps first; the largest are listed below (some, like models, are slow to re-download)"),
+    r!(".cache/thumbnails", "Thumbnail cache", Safe, "rm -rf {p}/*", ""),
+    r!(".config/Code/Cache", "VS Code cache", Safe, "rm -rf {p}", ""),
+    r!(".config/Code/CachedData", "VS Code cached data", Safe, "rm -rf {p}", ""),
+    r!(".config/Code/CachedExtensionVSIXs", "VS Code extension installers", Safe, "rm -rf {p}", ""),
+    r!(".config/Code/User/workspaceStorage", "VS Code workspace storage", Review, "rm -rf {p}/*", "Per-workspace state, including old projects"),
+    r!(".config/Slack/Service Worker/CacheStorage", "Slack cache", Safe, "rm -rf {p}", "Quit Slack first"),
+    r!("Downloads", "Downloads", Review, "xdg-open {p}", "Installers and one-offs pile up here (see largest files)"),
+    r!("Videos", "Videos", Personal, "", ""),
+    r!("Pictures", "Pictures", Personal, "", ""),
+    r!("Music", "Music", Personal, "", ""),
+    r!(".local/share/flatpak", "Flatpak apps (user)", Review, "flatpak uninstall --user --unused", "Also removes runtimes nothing uses any more"),
+    r!("snap", "Snap app data", Review, "", "Per-snap user data, kept for each revision"),
+    r!(".local/share/Steam/steamapps", "Steam games", Personal, "", "Uninstall games from Steam"),
+    // --- containers / VMs
+    r!(".local/share/docker", "Docker (rootless) data", Review, "docker system df && docker system prune -a", ""),
+    r!(".local/share/gnome-boxes/images", "GNOME Boxes VMs", Review, "", "Delete VMs you don't use from Boxes"),
+    r!(".local/share/libvirt/images", "libvirt VM disks (user)", Review, "virsh -c qemu:///session vol-list default", ""),
+    r!("Android/Sdk", "Android SDK", Review, "", "Uninstall old platforms and system images in SDK Manager"),
+    // --- package managers & toolchains
+    r!(".cache/yarn", "Yarn cache", Safe, "yarn cache clean", ""),
+    r!(".local/share/pnpm/store", "pnpm store", Safe, "pnpm store prune", ""),
+    r!(".cache/ms-playwright", "Playwright browsers", Safe, "npx playwright uninstall --all", "Re-installed by npx playwright install"),
+    r!(".cache/Cypress", "Cypress binaries", Safe, "npx cypress cache prune", ""),
+    r!(".local/share/fnm/node-versions", "fnm Node versions", Review, "fnm list  # then: fnm uninstall <version>", ""),
+    r!(".cache/go-build", "Go build cache", Safe, "go clean -cache", ""),
+    r!(".cache/pypoetry", "Poetry cache", Safe, "poetry cache clear --all .", ""),
+    r!(".cache/JetBrains", "JetBrains caches", Safe, "rm -rf {p}/*", "Old IDE version caches pile up"),
+    r!(".local/share/JetBrains", "JetBrains IDE data", Review, "xdg-open {p}", "Folders for old IDE versions are safe to remove"),
+    r!(".cache/bazel", "Bazel cache", Safe, "bazel clean --expunge  # per workspace; or remove this folder", ""),
+];
+
+/// Big per-app data folders (relative to $HOME) get flagged even without a specific rule.
+#[cfg(target_os = "macos")]
+pub const APP_DATA_DIRS: &[(&str, &str)] = &[
+    ("Library/Application Support", "App data"),
+    ("Library/Containers", "Sandboxed app data"),
+    ("Library/Group Containers", "Shared app data"),
+];
+#[cfg(target_os = "linux")]
+pub const APP_DATA_DIRS: &[(&str, &str)] = &[
+    (".local/share", "App data"),
+    (".config", "App config/data"),
+    (".var/app", "Flatpak app data"),
+];
+
+/// Opens a folder in the desktop's file manager.
+#[cfg(target_os = "macos")]
+pub const OPEN: &str = "open";
+#[cfg(target_os = "linux")]
+pub const OPEN: &str = "xdg-open";
+
+/// Where other people's home folders live.
+#[cfg(target_os = "macos")]
+pub const USERS_DIR: &str = "/Users";
+#[cfg(target_os = "linux")]
+pub const USERS_DIR: &str = "/home";
+
+/// What to do about unreadable folders.
+#[cfg(target_os = "macos")]
+pub const UNREADABLE_HINT: &str = "Give your terminal Full Disk Access: System Settings › Privacy & Security › Full Disk Access";
+#[cfg(target_os = "linux")]
+pub const UNREADABLE_HINT: &str = "Run with sudo to include them (~ still means your home)";
+
 /// Absolute, outside-home locations (seen when scanning / or a system folder).
+#[cfg(target_os = "macos")]
 pub const SYSTEM_RULES: &[Rule] = &[
     r!("/Applications", "Applications", Personal, "open /Applications", "Uninstall apps you no longer use (check for Xcode betas, old Office/Adobe)"),
     r!("/Applications/Xcode.app", "Xcode", Review, "", "Needed for iOS/macOS development; xcode-select --install gets just the CLI tools"),
@@ -138,6 +212,44 @@ pub const SYSTEM_RULES: &[Rule] = &[
     r!("/private/var/db/diagnostics", "Unified log store", Review, "sudo log erase --all", "macOS caps and rotates this itself"),
     r!("/private/var/vm", "Swap & sleep image", Review, "", "Shrinks after a reboot"),
     r!("/Users/Shared", "Shared user folder", Personal, "open /Users/Shared", "Some installers leave large content here"),
+];
+
+#[cfg(target_os = "linux")]
+pub const SYSTEM_RULES: &[Rule] = &[
+    // --- containers / VMs
+    r!("/var/lib/docker", "Docker data", Review, "docker system df && docker system prune -a --volumes", "Images, containers, volumes and build cache"),
+    r!("/var/lib/containers", "Podman storage (root)", Review, "sudo podman system prune -a", ""),
+    r!("/var/lib/containerd", "containerd images", Review, "sudo crictl rmi --prune", ""),
+    r!("/var/lib/libvirt/images", "libvirt VM disks", Review, "sudo virsh vol-list default", "Delete VMs you don't use (virt-manager), or shrink with virt-sparsify"),
+    r!("/var/lib/machines", "systemd-nspawn machines", Review, "machinectl list-images", ""),
+    // --- package managers
+    r!("/var/cache/dnf", "dnf package cache", Safe, "sudo dnf clean all", ""),
+    r!("/var/cache/libdnf5", "dnf5 package cache", Safe, "sudo dnf clean all", ""),
+    r!("/var/cache/PackageKit", "PackageKit cache (GNOME Software)", Safe, "sudo pkcon refresh force -c -1  # or: sudo rm -rf /var/cache/PackageKit/*", "Downloaded offline updates"),
+    r!("/var/cache/apt", "apt package cache", Safe, "sudo apt-get clean", ""),
+    r!("/var/cache/pacman/pkg", "pacman package cache", Safe, "sudo paccache -rk1  # keeps the newest of each", ""),
+    r!("/var/cache/zypp", "zypper cache", Safe, "sudo zypper clean -a", ""),
+    r!("/var/lib/flatpak", "Flatpak apps (system)", Review, "flatpak uninstall --unused", "Also removes runtimes nothing uses any more"),
+    r!("/var/lib/snapd", "Snap packages", Review, "snap list --all  # disabled revisions: sudo snap remove <name> --revision=<rev>", "Also: sudo snap set system refresh.retain=2"),
+    r!("/sysroot/ostree", "rpm-ostree deployments", Review, "rpm-ostree status  # then: sudo rpm-ostree cleanup -p -r -m", "Fedora Atomic (Silverblue, Kinoite…): pending/rollback deployments and cached metadata"),
+    r!("/usr", "Installed packages (/usr)", Review, "", "Remove packages you don't use: sudo dnf autoremove / sudo apt autoremove / pacman -Qdtq"),
+    r!("/usr/lib/modules", "Kernel modules", Review, "", "One folder per installed kernel. Fedora keeps installonly_limit (3) in /etc/dnf/dnf.conf"),
+    r!("/opt", "Third-party software (/opt)", Review, "", ""),
+    r!("/home/linuxbrew/.linuxbrew", "Homebrew (Linux)", Review, "brew autoremove && brew cleanup --prune=all", ""),
+    r!("/usr/share/ollama/.ollama/models", "Ollama models (system service)", Review, "ollama list  # then: ollama rm <model>", ""),
+    r!("/var/lib/ollama", "Ollama models (system service)", Review, "ollama list  # then: ollama rm <model>", ""),
+    // --- logs / crashes / temp
+    r!("/var/log/journal", "systemd journal", Review, "journalctl --disk-usage && sudo journalctl --vacuum-size=500M", "Cap it with SystemMaxUse= in journald.conf (NixOS: services.journald.extraConfig)"),
+    r!("/var/log", "System logs", Review, "", "Look for huge or rotated logs (*.gz, *.1, *-YYYYMMDD)"),
+    r!("/var/lib/systemd/coredump", "Core dumps", Safe, "coredumpctl list  # then: sudo rm /var/lib/systemd/coredump/*", ""),
+    r!("/var/crash", "Crash reports", Safe, "sudo rm -rf /var/crash/*", ""),
+    r!("/var/spool/abrt", "ABRT crash reports", Safe, "sudo abrt-cli rm /var/spool/abrt/*  # or: sudo rm -rf /var/spool/abrt/*", ""),
+    r!("/var/tmp", "Persistent temp files", Review, "", "Survives reboots; check for old leftovers"),
+    r!("/tmp", "Temp files", Review, "", "Usually cleared at boot"),
+    // --- databases (data, shown so you know)
+    r!("/var/lib/postgresql", "PostgreSQL data", Personal, "", ""),
+    r!("/var/lib/pgsql", "PostgreSQL data", Personal, "", ""),
+    r!("/var/lib/mysql", "MySQL/MariaDB data", Personal, "", ""),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -209,9 +321,12 @@ impl ArtifactKind {
 /// Hints for individual large files by extension.
 pub fn file_hint(name: &str) -> Option<&'static str> {
     let lower = name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "swapfile" | "swap.img" | "swap") {
+        return Some("swap file; resize with care, not delete while in use");
+    }
     let ext = lower.rsplit('.').next().unwrap_or("");
     Some(match ext {
-        "dmg" | "pkg" | "mpkg" | "xip" => "installer, usually not needed once installed",
+        "dmg" | "pkg" | "mpkg" | "xip" | "deb" | "rpm" | "appimage" | "flatpak" => "installer, usually not needed once installed",
         "ipsw" => "iOS/macOS firmware image",
         "iso" | "img" => "disk image",
         "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" | "xz" | "zst" => "archive; is it already extracted?",

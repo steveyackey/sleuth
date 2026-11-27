@@ -12,37 +12,75 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const EXAMPLES: &str = "\x1b[1;4mExamples:\x1b[0m
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("sleuth supports macOS and Linux");
+
+#[cfg(target_os = "macos")]
+const WHOLE: &str = "The whole Mac (apps, /Library, /private/var, other users)";
+#[cfg(target_os = "linux")]
+const WHOLE: &str = "The whole root filesystem (/usr, /var, /opt, /nix, other users)";
+
+#[cfg(target_os = "macos")]
+const OUTSIDE: &str = "Space a folder walk can't see: other volumes (swap, Preboot), snapshots, unreadable folders";
+#[cfg(target_os = "linux")]
+const OUTSIDE: &str = "Space a folder walk can't see: deleted files still held open, other mounts, unreadable folders";
+
+#[cfg(target_os = "macos")]
+const ACCESS_TIP: &str = "  • Seeing \"N folders were unreadable\"? Give your terminal Full Disk Access:
+    System Settings › Privacy & Security › Full Disk Access
+  • sudo sleuth / also counts root-only folders; ~ still means your home.";
+#[cfg(target_os = "linux")]
+const ACCESS_TIP: &str = "  • sudo sleuth / also counts root-only folders (/var/lib/docker, journals) and every
+    process's deleted-but-open files; ~ still means your home.
+  • Other mounts (a separate /home, /boot) are skipped unless you pass --cross-mounts.
+    btrfs subvolumes of the same filesystem (Fedora's default layout) are walked.";
+
+fn examples() -> String {
+    format!(
+        "\x1b[1;4mExamples:\x1b[0m
   sleuth                      Investigate your home folder
-  sleuth /                    The whole Mac (apps, /Library, /private/var, other users)
+  sleuth /                    {WHOLE}
   sleuth ~/code               Drill into one folder
   sleuth -d 5 --min-pct 0.5   Deeper, finer folder tree
   sleuth --script clean.sh    Every suggestion as a script, all lines commented out
-  sleuth --json | jq '.suspects[] | {label, size}'
-  sleuth --json | jq '.nix.pins[] | {label, unique_bytes}'";
+  sleuth --actions            One JSON object per suggestion, per line (for agents and scripts)
+  sleuth --json | jq '.suspects[] | {{label, size}}'
+  sleuth --json | jq '.nix.pins[] | {{label, unique_bytes}}'"
+    )
+}
 
-const MORE: &str = "\x1b[1;4mReading the report:\x1b[0m
-  WHERE IT IS         Folder tree, largest first. Sizes are on-disk bytes, like du (decimal GB, like Finder)
-  SUSPECTS            Known space hogs (caches, Docker, Xcode, package managers, app data)
+fn more() -> String {
+    format!(
+        "\x1b[1;4mReading the report:\x1b[0m
+  WHERE IT IS         Folder tree, largest first. Sizes are on-disk bytes, like du (decimal GB)
+  SUSPECTS            Known space hogs (caches, containers, package managers, app data)
   PROJECT LEFTOVERS   node_modules, target/, bin/obj, venvs… flagged stale when the project is idle
   LARGEST FILES       Biggest single files, with what they probably are
-  OUTSIDE THE WALK    Space a folder walk can't see: other volumes (swap, Preboot), snapshots, unreadable folders
+  OUTSIDE THE WALK    {OUTSIDE}
   NIX STORE           If /nix exists: what keeps store paths alive (old generations, result links,
                       direnv caches, running processes) and how much each would free on its own
 
 \x1b[1;4mSafety tags:\x1b[0m
   SAFE     Regenerates on its own (caches, build output). Clearing it costs a re-download or rebuild
-  REVIEW   Probably reclaimable, but look first (Downloads, Docker images, VMs, old toolchains)
+  REVIEW   Probably reclaimable, but look first (Downloads, container images, VMs, old toolchains)
   YOURS    Your data. Shown so you know where the space is
+
+\x1b[1;4mFor agents and scripts:\x1b[0m
+  --actions prints one JSON object per line: {{id, kind, label, path, bytes, safety, command,
+  needs_sudo, stale, note}}, SAFE first then largest first. --json is the full report with the
+  same list under .actions (schema_version {schema}). Errors go to stderr; with --json/--actions
+  they're a JSON object {{\"error\": …, \"path\": …}}. Exit codes: 0 ok, 1 couldn't write --script,
+  2 bad path or arguments. sleuth never deletes, and every command is a suggestion.
 
 \x1b[1;4mTips:\x1b[0m
   • sleuth never deletes. Commands it prints are suggestions you run yourself.
-  • Seeing \"N folders were unreadable\"? Give your terminal Full Disk Access:
-    System Settings › Privacy & Security › Full Disk Access
-  • sudo sleuth / also counts root-only folders; ~ still means your home.
-  • Re-run on any folder from the tree to drill in. It's fast enough to just ask again.";
+{ACCESS_TIP}
+  • Re-run on any folder from the tree to drill in. It's fast enough to just ask again.",
+        schema = report::SCHEMA_VERSION
+    )
+}
 
-/// Find out what's eating your Mac's disk, fast. Read-only: it never deletes anything.
+/// Find out what's eating your disk, fast. Read-only: it never deletes anything.
 ///
 /// sleuth walks a folder, shows where the space went, picks out the known space hogs,
 /// rates how safe each is to reclaim, and prints the exact command to run if you choose to.
@@ -50,11 +88,11 @@ const MORE: &str = "\x1b[1;4mReading the report:\x1b[0m
 #[command(
     name = "sleuth",
     version,
-    after_help = format!("{EXAMPLES}\n\nMore detail: sleuth --help"),
-    after_long_help = format!("{EXAMPLES}\n\n{MORE}"),
+    after_help = format!("{}\n\nMore detail: sleuth --help", examples()),
+    after_long_help = format!("{}\n\n{}", examples(), more()),
 )]
 struct Args {
-    /// Folder to investigate [default: ~]. "/" scans the whole Mac
+    /// Folder to investigate [default: ~]. "/" scans the whole disk
     #[arg(value_name = "PATH")]
     path: Option<PathBuf>,
 
@@ -83,8 +121,12 @@ struct Args {
     script: Option<PathBuf>,
 
     /// Print the full report as JSON
-    #[arg(long, help_heading = "Output")]
+    #[arg(long, help_heading = "Output", conflicts_with = "actions")]
     json: bool,
+
+    /// Print only the suggested actions, one JSON object per line (NDJSON)
+    #[arg(long, help_heading = "Output")]
+    actions: bool,
 
     /// Plain text without colors (also honors NO_COLOR)
     #[arg(long, help_heading = "Output")]
@@ -107,15 +149,23 @@ struct Args {
     threads: Option<usize>,
 }
 
+/// Print an error the way the caller can read it, then exit.
+fn fail(machine: bool, code: i32, path: &std::path::Path, msg: impl std::fmt::Display) -> ! {
+    if machine {
+        eprintln!("{}", serde_json::json!({ "error": msg.to_string(), "path": path, "exit_code": code }));
+    } else {
+        eprintln!("sleuth: {}: {msg}", path.display());
+    }
+    std::process::exit(code);
+}
+
 fn main() {
     let args = Args::parse();
     util::init_color(args.no_color);
+    let machine = args.json || args.actions;
 
     let mut root = args.path.clone().or_else(util::home).unwrap_or_else(|| PathBuf::from("."));
-    root = std::fs::canonicalize(&root).unwrap_or_else(|e| {
-        eprintln!("sleuth: {}: {e}", root.display());
-        std::process::exit(2);
-    });
+    root = std::fs::canonicalize(&root).unwrap_or_else(|e| fail(machine, 2, &root, e));
     // On modern macOS user data lives on the Data volume; "/" is the sealed system snapshot.
     if root == PathBuf::from("/") && std::path::Path::new("/System/Volumes/Data").is_dir() {
         root = PathBuf::from("/System/Volumes/Data");
@@ -127,13 +177,10 @@ fn main() {
 
     let scanner = match scan::Scanner::new(&root, !args.cross_mounts, args.top.max(50)) {
         Ok(s) => Arc::new(s),
-        Err(e) => {
-            eprintln!("sleuth: {}: {e}", root.display());
-            std::process::exit(2);
-        }
+        Err(e) => fail(machine, 2, &root, e),
     };
 
-    // Kick off the slow-ish system probes (tmutil, sysctl) while we walk.
+    // Kick off the slow-ish system probes (tmutil/sysctl on macOS, /proc on Linux) while we walk.
     let mut volume = sys::volume_of(&root);
     let sys_handle = if args.no_system {
         None
@@ -144,7 +191,7 @@ fn main() {
     let nix_handle = if args.no_system || args.no_nix { None } else { Some(std::thread::spawn(nix::analyze)) };
 
     let done = Arc::new(AtomicBool::new(false));
-    let progress = if !args.json && std::io::stderr().is_terminal() {
+    let progress = if !machine && std::io::stderr().is_terminal() {
         let (s, d) = (scanner.clone(), done.clone());
         Some(std::thread::spawn(move || {
             let t = Instant::now();
@@ -198,11 +245,15 @@ fn main() {
 
     if let Some(path) = &args.script {
         if let Err(e) = std::fs::write(path, report::script(&rep)) {
-            eprintln!("sleuth: could not write {}: {e}", path.display());
-            std::process::exit(1);
+            fail(machine, 1, path, format!("could not write script: {e}"));
         }
     }
-    if args.json {
+    if args.actions {
+        let mut out = std::io::stdout().lock();
+        for a in &rep.actions {
+            let _ = writeln!(out, "{}", serde_json::to_string(a).unwrap());
+        }
+    } else if args.json {
         println!("{}", serde_json::to_string_pretty(&rep).unwrap());
     } else {
         print!("{}", report::text(&rep, args.top));
