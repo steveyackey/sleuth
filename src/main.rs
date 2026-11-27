@@ -144,7 +144,7 @@ struct Args {
     #[arg(long, help_heading = "Scanning")]
     no_nix: bool,
 
-    /// Worker threads [default: 2 × CPU cores, at least 16]
+    /// Worker threads [default: 4 on macOS; 2 × CPU cores, at least 16, on Linux]
     #[arg(short = 'j', long, value_name = "N", help_heading = "Scanning")]
     threads: Option<usize>,
 }
@@ -172,9 +172,11 @@ fn main() {
     }
 
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
-    // Directory walking waits on I/O far more than CPU, so even small machines (and network or VM
-    // filesystems like NFS/virtiofs, where every stat is a round trip) gain from more threads.
-    let threads = args.threads.unwrap_or((cores * 2).max(16));
+    // macOS: getattrlistbulk on local APFS stops scaling around 4 threads, and more only add contention.
+    // Linux: the walk waits on I/O far more than CPU, so small machines and network/VM filesystems
+    // (NFS, virtiofs: every stat is a round trip) gain from many threads.
+    let default_threads = if cfg!(target_os = "macos") { cores.min(4) } else { (cores * 2).max(16) };
+    let threads = args.threads.unwrap_or(default_threads);
     rayon::ThreadPoolBuilder::new().num_threads(threads).stack_size(16 << 20).build_global().ok();
 
     let scanner = match scan::Scanner::new(&root, !args.cross_mounts, args.top.max(50)) {
