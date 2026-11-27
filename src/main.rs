@@ -144,7 +144,7 @@ struct Args {
     #[arg(long, help_heading = "Scanning")]
     no_nix: bool,
 
-    /// Worker threads [default: 2 × CPU cores]
+    /// Worker threads [default: 2 × CPU cores, at least 16]
     #[arg(short = 'j', long, value_name = "N", help_heading = "Scanning")]
     threads: Option<usize>,
 }
@@ -172,7 +172,9 @@ fn main() {
     }
 
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
-    let threads = args.threads.unwrap_or(cores * 2);
+    // Directory walking waits on I/O far more than CPU, so even small machines (and network or VM
+    // filesystems like NFS/virtiofs, where every stat is a round trip) gain from more threads.
+    let threads = args.threads.unwrap_or((cores * 2).max(16));
     rayon::ThreadPoolBuilder::new().num_threads(threads).stack_size(16 << 20).build_global().ok();
 
     let scanner = match scan::Scanner::new(&root, !args.cross_mounts, args.top.max(50)) {
