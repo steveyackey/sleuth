@@ -87,6 +87,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v32
+        with:
+          # Nix 2.36 dropped the x86_64-darwin installer; 2.35.0 is the last one with it.
+          install_url: ${{ matrix.system == 'x86_64-darwin' && 'https://releases.nixos.org/nix/nix-2.35.0/install' || '' }}
       - run: nix build -L .#sleuth
       - run: ./result/bin/sleuth . --no-color --no-nix > /dev/null
       - run: nix flake check -L
