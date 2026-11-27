@@ -83,3 +83,7 @@ In practice the filesystem is the limit.
 Commits follow [Conventional Commits](https://www.conventionalcommits.org) (enforced in CI; `nix develop` installs a
 local hook). [release-plz](https://release-plz.dev) turns them into the changelog and releases: merge its release PR
 and the tag, GitHub release and binaries follow. See [AGENTS.md](AGENTS.md).
+
+## License
+
+[MIT](LICENSE)

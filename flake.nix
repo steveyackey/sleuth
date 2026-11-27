@@ -20,6 +20,7 @@
           meta = {
             description = manifest.package.description;
             mainProgram = "sleuth";
+            license = pkgs.lib.licenses.mit;
             platforms = systems;
           };
         };

@@ -103,7 +103,7 @@ jobs:
           set -euo pipefail
           name="sleuth-$TAG-$TARGET"
           mkdir "$name"
-          cp "target/$TARGET/release/sleuth" README.md AGENTS.md "$name/"
+          cp "target/$TARGET/release/sleuth" README.md AGENTS.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           gh release upload "$TAG" "$name.tar.gz" "$name.tar.gz.sha256" --clobber
