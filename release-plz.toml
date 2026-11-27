@@ -7,3 +7,7 @@ git_release_enable = true
 changelog_update = true
 # A binary crate has no public API to semver-check.
 semver_check = false
+# Only cut a release for user-facing changes: feat, fix, perf, or anything marked breaking (!).
+# docs/ci/chore/refactor commits still land in the next release's changelog. Without this, the
+# changelog commit from merging a release PR would itself trigger a patch release.
+release_commits = '^((feat|fix|perf)(\(.+\))?!?|[a-z]+(\(.+\))?!):'
