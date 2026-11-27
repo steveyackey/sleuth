@@ -35,6 +35,8 @@ Rules for agents:
 - **Don't run `review` commands without the user's go-ahead.** `safe` ones only cost a re-download or a rebuild,
   but still say what you're about to clear and how big it is.
 - Drill in with `sleuth <tree node .path>`. Every node in `--json` `.tree` has an absolute `path`.
+- Speed: `sleuth <big dir> --bench --json` times several thread counts and returns `recommended_threads`.
+  `-j N` or `SLEUTH_THREADS=N` applies it. Defaults are 4 on macOS and at least 16 on Linux.
 - `--min-mb N` (default 100) hides smaller items, `-n N` limits the largest-files list, and `--no-nix` / `--no-system`
   skip slower probes.
 - Errors: with `--json` or `--actions`, stderr gets `{"error": "...", "path": "...", "exit_code": N}`.

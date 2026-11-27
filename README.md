@@ -31,6 +31,7 @@ sleuth --script clean.sh  # write every suggestion to a script, all lines commen
 sleuth --json | jq        # machine-readable
 sleuth --actions          # one JSON suggestion per line, ranked (for agents and scripts; see AGENTS.md)
 sleuth -d 5 --min-pct 0.5 # deeper and finer folder tree
+sleuth ~ --bench          # find the fastest thread count here; then export SLEUTH_THREADS=N
 ```
 
 For complete results on macOS, give your terminal **Full Disk Access**

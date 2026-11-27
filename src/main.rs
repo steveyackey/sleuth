@@ -144,9 +144,13 @@ struct Args {
     #[arg(long, help_heading = "Scanning")]
     no_nix: bool,
 
-    /// Worker threads [default: 4 on macOS; 2 × CPU cores, at least 16, on Linux]
-    #[arg(short = 'j', long, value_name = "N", help_heading = "Scanning")]
+    /// Worker threads [default: 4 on macOS; 2 × CPU cores, at least 16, on Linux]. Find the best with --bench
+    #[arg(short = 'j', long, value_name = "N", env = "SLEUTH_THREADS", help_heading = "Scanning")]
     threads: Option<usize>,
+
+    /// Time the scan of PATH at several thread counts and recommend the fastest -j
+    #[arg(long, help_heading = "Scanning")]
+    bench: bool,
 }
 
 /// Print an error the way the caller can read it, then exit.
@@ -159,6 +163,53 @@ fn fail(machine: bool, code: i32, path: &std::path::Path, msg: impl std::fmt::Di
     std::process::exit(code);
 }
 
+/// One timed scan of root with a fresh pool of j threads: (seconds, files).
+fn timed_scan(root: &std::path::Path, one_fs: bool, j: usize) -> (f64, u64) {
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(j).stack_size(16 << 20).build().expect("thread pool");
+    let s = scan::Scanner::new(root, one_fs, 1).unwrap_or_else(|e| fail(false, 2, root, e));
+    let t = Instant::now();
+    pool.install(|| s.run(root));
+    (t.elapsed().as_secs_f64(), s.files.load(Relaxed))
+}
+
+/// Find the thread count that scans root fastest on this machine and filesystem.
+fn bench(root: &std::path::Path, one_fs: bool, json: bool) {
+    let say = |s: String| if !json { eprintln!("{s}") };
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+    let counts: Vec<usize> = [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64].into_iter().filter(|&j| j <= (cores * 8).max(64)).collect();
+    say(format!("benchmarking {} ({cores} usable cores). Warming the cache first…", util::tilde(root)));
+    let (warm, files) = timed_scan(root, one_fs, 16);
+    if warm < 2.0 {
+        say(format!("  note: {} scans in {warm:.1}s, too fast to measure reliably. Pick a bigger folder (~ or /) for a trustworthy answer.", util::tilde(root)));
+    }
+    say(format!("  warm-up: {files} files in {warm:.1}s\n\n  threads     time     files/s"));
+    let mut results: Vec<(usize, f64)> = Vec::new();
+    let mut worse_in_a_row = 0;
+    for &j in &counts {
+        // best of two runs, so one noisy run doesn't decide it
+        let secs = timed_scan(root, one_fs, j).0.min(timed_scan(root, one_fs, j).0);
+        let best = results.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+        say(format!("  {j:>7}  {secs:>6.2}s  {:>10.0}{}", files as f64 / secs, if secs < best { "  ← fastest so far" } else { "" }));
+        results.push((j, secs));
+        // stop once more threads are clearly hurting
+        worse_in_a_row = if secs > best * 1.15 { worse_in_a_row + 1 } else { 0 };
+        if worse_in_a_row >= 2 {
+            break;
+        }
+    }
+    let best = results.iter().map(|r| r.1).fold(f64::INFINITY, f64::min);
+    // the smallest count within 5% of the fastest: same speed, less contention
+    let pick = results.iter().find(|r| r.1 <= best * 1.05).map(|r| r.0).unwrap_or(16);
+    if json {
+        let rows: Vec<_> = results.iter().map(|(j, s)| serde_json::json!({ "threads": j, "seconds": s })).collect();
+        println!("{}", serde_json::json!({ "root": root, "files": files, "cores": cores, "results": rows, "recommended_threads": pick }));
+    } else {
+        say(format!(
+            "\n  recommended: -j {pick}  (the fewest threads within 5% of the fastest, {best:.2}s)\n  → export SLEUTH_THREADS={pick}   # makes it the default\n  Times are with a warm cache; a cold first scan is slower, but the best -j is usually the same."
+        ));
+    }
+}
+
 fn main() {
     let args = Args::parse();
     util::init_color(args.no_color);
@@ -169,6 +220,11 @@ fn main() {
     // On modern macOS user data lives on the Data volume; "/" is the sealed system snapshot.
     if root == PathBuf::from("/") && std::path::Path::new("/System/Volumes/Data").is_dir() {
         root = PathBuf::from("/System/Volumes/Data");
+    }
+
+    if args.bench {
+        bench(&root, !args.cross_mounts, args.json);
+        return;
     }
 
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
